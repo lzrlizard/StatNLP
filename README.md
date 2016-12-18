@@ -2,7 +2,7 @@ StatNLP
 =====
 What’s StatNLP? </br>
 ------------
-StatNLP Framework is a NLP algorithm framework built on Java. The framework allows various efficient data processing algorithms to be rapidly prototyped. Various low level optimisation routines are all taken care of by the framework. The users only need to focus on model design.
+StatNLP Framework is a NLP algorithm framework built on Java. The framework allows various efficient data processing algorithms to be rapidly prototyped. Various low level optimisation routines are all taken care of by the framework. The users only need to focus on model design. (http://www.statnlp.org/)
 
 Who are we? </br>
 ------------
