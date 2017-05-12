@@ -20,9 +20,11 @@ import static com.statnlp.commons.Utils.print;
 
 import java.io.PrintStream;
 import java.io.Serializable;
+import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
@@ -33,6 +35,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 import com.statnlp.commons.types.Instance;
+import com.statnlp.hybridnetworks.NetworkConfig.InferenceType;
+import com.statnlp.neural.NNCRFGlobalNetworkParam;
+import com.statnlp.ui.visualize.type.VisualizationViewerEngine;
+import com.statnlp.ui.visualize.type.VisualizerFrame;
 
 public abstract class NetworkModel implements Serializable{
 	
@@ -54,6 +60,8 @@ public abstract class NetworkModel implements Serializable{
 	private transient LocalNetworkLearnerThread[] _learners;
 	//the local decoder.
 	private transient LocalNetworkDecoderThread[] _decoders;
+	//neuralCRF/SSVM socket controller
+	private NNCRFGlobalNetworkParam nnController;
 	private transient PrintStream[] outstreams = new PrintStream[]{System.out};
 	
 	public NetworkModel(FeatureManager fm, NetworkCompiler compiler, PrintStream... outstreams){
@@ -80,6 +88,10 @@ public abstract class NetworkModel implements Serializable{
 	
 	public Network getUnlabeledNetwork(int instanceId){
 		return unlabeledNetworkByInstanceId[instanceId-1];
+	}
+	
+	public Instance[] getInstances(){
+		return _allInstances;
 	}
 	
 	protected abstract Instance[][] splitInstancesForTrain();
@@ -115,28 +127,110 @@ public abstract class NetworkModel implements Serializable{
 		
 		return insts;
 	}
+
+	/**
+	 * Visualize the trained instances using the specified viewer engine.<br>
+	 * Note that this assumes that the training is done.
+	 * @param clazz The class of the viewer engine to be used to visualize the instances.
+	 * @throws InterruptedException If there are interruptions during the compilation process of the instances in multi-threaded setting.
+	 * @throws IllegalStateException If train method has not been called. This means there are no instances to be visualized.
+	 * @see {@link #visualize(Class, Instance[])}
+	 * @see {@link #visualize(Class, Instance[], int)}
+	 */
+	public void visualize() throws InterruptedException, IllegalStateException {
+		visualize(VisualizationViewerEngine.class);
+	}
 	
-	public void train(Instance[] allInstances, int maxNumIterations) throws InterruptedException{
-		
-		this._numThreads = NetworkConfig.NUM_THREADS;
-		
-		this._allInstances = allInstances;
-		for(int k = 0; k<this._allInstances.length; k++){
-//			System.err.println(k);
-			this._allInstances[k].setInstanceId(k+1);
+	/**
+	 * Visualize the trained instances using the specified viewer engine.<br>
+	 * Note that this assumes that the training is done.
+	 * @param clazz The class of the viewer engine to be used to visualize the instances.
+	 * @throws InterruptedException If there are interruptions during the compilation process of the instances in multi-threaded setting.
+	 * @throws IllegalStateException If train method has not been called. This means there are no instances to be visualized.
+	 * @throws IllegalArgumentException If the viewer engine specified does not implement the correct constructor.
+	 * 									The viewer engine needs to implement the constructor with signature (NetworkCompiler, FeatureManager)
+	 * @see {@link #visualize(Class, Instance[])}
+	 * @see {@link #visualize(Class, Instance[], int)}
+	 */
+	public void visualize(Class<? extends VisualizationViewerEngine> clazz) throws InterruptedException, IllegalArgumentException, IllegalStateException{
+		if(unlabeledNetworkByInstanceId == null){
+			throw new IllegalStateException("Please specify the instances to be visualized.");
 		}
-		this._fm.getParam_G().setInstsNum(this._allInstances.length);
-		HashSet<Integer> batchInstIds = new HashSet<Integer>();
+		visualize(clazz, null, _allInstances.length);
+	}
+	
+
+	/**
+	 * Visualize the instances using the specified viewer engine.
+	 * @param clazz The class of the viewer engine to be used to visualize the instances.
+	 * @param allInstances The instances to be visualized
+	 * @throws IllegalArgumentException If the viewer engine specified does not implement the correct constructor.
+	 * 									The viewer engine needs to implement the constructor with signature (NetworkCompiler, FeatureManager)
+	 */
+	public void visualize(Class<? extends VisualizationViewerEngine> clazz, Instance[] allInstances) throws InterruptedException{
+		visualize(clazz, allInstances, allInstances.length);
+	}
+	
+	/**
+	 * Visualize the instances using the specified viewer engine.
+	 * @param clazz The class of the viewer engine to be used to visualize the instances.
+	 * @param allInstances The instances to be visualized
+	 * @param trainLength The number of instances to be visualized. This can be less than the number of instances in allInstances
+	 * @throws InterruptedException If there are interruptions during the compilation process of the instances in multi-threaded setting.
+	 * @throws IllegalArgumentException If the viewer engine specified does not implement the correct constructor.
+	 * 									The viewer engine needs to implement the constructor with signature (NetworkCompiler, FeatureManager)
+	 */
+	public void visualize(Class<? extends VisualizationViewerEngine> clazz, Instance[] allInstances, int trainLength) throws InterruptedException, IllegalArgumentException {
+		if(allInstances != null){
+			System.err.print("Compiling networks...");
+			long start = System.nanoTime();
+			preCompileNetworks(prepareInstanceForCompilation(allInstances, trainLength));
+			long end = System.nanoTime();
+			System.err.printf("Done in %.3fs\n", (end-start)/1.0e9);
+		}
+		try {
+			new VisualizerFrame(this, clazz.getConstructor(NetworkCompiler.class, FeatureManager.class).newInstance(_compiler, _fm));
+		} catch (InstantiationException | IllegalAccessException | IllegalArgumentException | InvocationTargetException
+				| NoSuchMethodException | SecurityException e) {
+			throw new IllegalArgumentException("The viewer class "+clazz.getName()+" must implement the constructor with signature (NetworkCompiler, FeatureManager)");
+		}
+	}
+	
+	/**
+	 * Starts training using the instances given for up to specified number of iterations.
+	 * @param allInstances The instances on which this model should be trained.
+	 * @param maxNumIterations The maximum number of iterations the training should go.
+	 * @throws InterruptedException If there are interruptions during multi-threaded training.
+	 */
+	public void train(Instance[] allInstances, int maxNumIterations) throws InterruptedException{
+		train(allInstances, allInstances.length, maxNumIterations);
+	}
+	
+	/**
+	 * Starts training using the instances given for up to specified number of iterations.
+	 * @param allInstances The instances on which this model should be trained.
+	 * @param trainLength The number of training instances used. This can be less than the number of instances in allInstances.
+	 * @param maxNumIterations The maximum number of iterations the training should go.
+	 * @throws InterruptedException If there are interruptions during multi-threaded training.
+	 */
+	public void train(Instance[] allInstances, int trainLength, int maxNumIterations) throws InterruptedException{
+		Instance[][] insts = prepareInstanceForCompilation(allInstances, trainLength);
 		ArrayList<Integer> instIds = new ArrayList<Integer>();
-		for(int i=0;i<_allInstances.length;i++) instIds.add(i+1);
-		
-		//create the threads.
-		this._learners = new LocalNetworkLearnerThread[this._numThreads];
-		
-		Instance[][] insts = this.splitInstancesForTrain();
-		
+		for(int i=0; i<trainLength; i++){
+			instIds.add(i+1);
+		}
+		/*
+		 * Pre-compile the networks
+		 * In mean-field, we need to pre-compile because we need the unlabeled network
+		 * information in feature extraction process for the labeled network.
+		 */
+		NetworkConfig.PRE_COMPILE_NETWORKS = NetworkConfig.INFERENCE == InferenceType.MEAN_FIELD ? true : false;
+		if(NetworkConfig.PRE_COMPILE_NETWORKS){
+			preCompileNetworks(insts);
+		}
+		boolean keepExistingThreads = NetworkConfig.PRE_COMPILE_NETWORKS ? true : false;
 		// The first touch
-		touch(insts, false);
+		touch(insts, keepExistingThreads);
 		
 		for(int threadId=0; threadId<this._numThreads; threadId++){
 			if(NetworkConfig.BUILD_FEATURES_FROM_LABELED_ONLY){
@@ -155,6 +249,7 @@ public abstract class NetworkModel implements Serializable{
 		
 		//finalize the features.
 		this._fm.getParam_G().lockIt();
+		nnController = this._fm.getParam_G()._nnController;
 		
 		if(NetworkConfig.BUILD_FEATURES_FROM_LABELED_ONLY && NetworkConfig.CACHE_FEATURES_DURING_TRAINING){
 			touch(insts, true); // Touch again to cache the features, both in labeled and unlabeled
@@ -177,26 +272,47 @@ public abstract class NetworkModel implements Serializable{
 			// Print the objective if not using softmax 
 			multiplier = -1;
 		}
-		
+
+		HashSet<Integer> batchInstIds = new HashSet<Integer>();
 		double obj_old = Double.NEGATIVE_INFINITY;
 		//run the EM-style algorithm now...
 		long startTime = System.currentTimeMillis();
 		try{
+			int batchId = 0;
+			int epochNum = 0;
+			double epochObj = 0.0;
 			for(int it = 0; it<=maxNumIterations; it++){
 				//at each iteration, shuffle the inst ids. and reset the set, which is already in the learner thread
 				if(NetworkConfig.USE_BATCH_TRAINING){
 					batchInstIds.clear();
-					Collections.shuffle(instIds, RANDOM);
+					if(NetworkConfig.RANDOM_BATCH || batchId == 0) {
+						Collections.shuffle(instIds, RANDOM);
+					}
 					int size = NetworkConfig.BATCH_SIZE >= this._allInstances.length ? this._allInstances.length:NetworkConfig.BATCH_SIZE; 
 					for(int iid = 0; iid<size; iid++){
-						batchInstIds.add(instIds.get(iid));
+						int offset = NetworkConfig.BATCH_SIZE*batchId;
+						batchInstIds.add(instIds.get(iid+offset));
+					}
+					if(!NetworkConfig.RANDOM_BATCH) {
+						batchId++;
+						int offset = NetworkConfig.BATCH_SIZE*batchId;
+						if(size+offset > instIds.size()) {
+							batchId = 0;
+							// this means one epoch
+							print(String.format("Epoch %d: Obj=%-18.12f", epochNum++, epochObj/instIds.size()), outstreams);
+							epochObj = 0.0;
+						}
 					}
 				}
 				for(LocalNetworkLearnerThread learner: this._learners){
 					learner.setIterationNumber(it);
 					if(NetworkConfig.USE_BATCH_TRAINING) learner.setInstanceIdSet(batchInstIds);
+					else learner.setTrainInstanceIdSet(new HashSet<Integer>(instIds));
 				}
 				long time = System.currentTimeMillis();
+				if (NetworkConfig.USE_NEURAL_FEATURES) {
+					nnController.forwardNetwork(true);
+				}
 				List<Future<Void>> results = pool.invokeAll(callables);
 				for(Future<Void> result: results){
 					try{
@@ -205,6 +321,8 @@ public abstract class NetworkModel implements Serializable{
 						throw new RuntimeException(e);
 					}
 				}
+				
+				
 				boolean done = true;
 				boolean lastIter = (it == maxNumIterations);
 				if(lastIter){
@@ -214,11 +332,17 @@ public abstract class NetworkModel implements Serializable{
 				}
 				time = System.currentTimeMillis() - time;
 				double obj = this._fm.getParam_G().getObj_old();
+				epochObj += obj;
 				print(String.format("Iteration %d: Obj=%-18.12f Time=%.3fs %.12f Total time: %.3fs", it, multiplier*obj, time/1000.0, obj/obj_old, (System.currentTimeMillis()-startTime)/1000.0), outstreams);
 				if(NetworkConfig.TRAIN_MODE_IS_GENERATIVE && it>1 && obj<obj_old && Math.abs(obj-obj_old)>1E-5){
 					throw new RuntimeException("Error:\n"+obj_old+"\n>\n"+obj);
 				}
 				obj_old = obj;
+				if (NetworkConfig.USE_NEURAL_FEATURES) {
+					if (lastIter || done) {
+						nnController.forwardNetwork(false);
+					}
+				}
 				if(lastIter){
 					print("Training completes. The specified number of iterations ("+it+") has passed.", outstreams);
 					break;
@@ -233,6 +357,35 @@ public abstract class NetworkModel implements Serializable{
 		}
 	}
 
+	private Instance[][] prepareInstanceForCompilation(Instance[] allInstances, int trainLength) {
+		this._numThreads = NetworkConfig.NUM_THREADS;
+		
+		this._allInstances = allInstances;
+		for(int k = 0; k<this._allInstances.length; k++){
+			this._allInstances[k].setInstanceId(k+1);
+		}
+		this._fm.getParam_G().setInstsNum(this._allInstances.length);
+		
+		//create the threads.
+		this._learners = new LocalNetworkLearnerThread[this._numThreads];
+		
+		return this.splitInstancesForTrain();
+	}
+
+	private void preCompileNetworks(Instance[][] insts) throws InterruptedException{
+		for(int threadId = 0; threadId < this._numThreads; threadId++){
+			this._learners[threadId] = new LocalNetworkLearnerThread(threadId, this._fm, insts[threadId], this._compiler, -1);
+			this._learners[threadId].setPrecompile();
+			this._learners[threadId].start();
+		}
+		for(int threadId = 0; threadId < this._numThreads; threadId++){
+			this._learners[threadId].join();
+			this._learners[threadId].unsetPrecompile();
+		}	
+		saveCompiledNetworks(insts);
+		System.err.println("Finish precompile the networks.");
+	}
+	
 	private void touch(Instance[][] insts, boolean keepExisting) throws InterruptedException {
 		if(!NetworkConfig.PARALLEL_FEATURE_EXTRACTION || NetworkConfig.NUM_THREADS == 1){
 			for(int threadId = 0; threadId<this._numThreads; threadId++){
@@ -258,10 +411,19 @@ public abstract class NetworkModel implements Serializable{
 				this._learners[threadId].join();
 				this._learners[threadId].setUnTouch();
 			}
-			if(!keepExisting){
+			
+			if(NetworkConfig.PRE_COMPILE_NETWORKS || !keepExisting){
+				//this one is because in the first touch, we don't have the exisiting threads if not precompile network. 
+				//So we merge in first feature extraction.
+				//If precompile network, we keep exisiting threads. But we still need to merge features because
+				//it is still the first touch. That's why we have the "OR" operation here.
 				this._fm.mergeSubFeaturesToGlobalFeatures();
 			}
 		}
+		saveCompiledNetworks(insts);
+	}
+
+	private void saveCompiledNetworks(Instance[][] insts) {
 		if(labeledNetworkByInstanceId == null || unlabeledNetworkByInstanceId == null){
 			labeledNetworkByInstanceId = new Network[this._allInstances.length];
 			unlabeledNetworkByInstanceId = new Network[this._allInstances.length];
@@ -294,6 +456,14 @@ public abstract class NetworkModel implements Serializable{
 	}
 	
 	public Instance[] decode(Instance[] allInstances, boolean cacheFeatures) throws InterruptedException{
+		return decode(allInstances, cacheFeatures, 1);
+	}
+	
+	public Instance[] decode(Instance[] allInstances, int numPredictionsGenerated) throws InterruptedException {
+		return decode(allInstances, false, numPredictionsGenerated);
+	}
+	
+	public Instance[] decode(Instance[] allInstances, boolean cacheFeatures, int numPredictionsGenerated) throws InterruptedException{
 		
 //		if(NetworkConfig.TRAIN_MODE_IS_GENERATIVE){
 //			this._fm.getParam_G().expandFeaturesForGenerativeModelDuringTesting();
@@ -316,10 +486,14 @@ public abstract class NetworkModel implements Serializable{
 		
 		//distribute the works into different threads.
 		for(int threadId = 0; threadId<this._numThreads; threadId++){
-			if(cacheFeatures && this._decoders[threadId] != null){
-				this._decoders[threadId] = new LocalNetworkDecoderThread(threadId, this._fm, insts[threadId], this._compiler, this._decoders[threadId].getParam(), true);
+			if(cacheFeatures){
+				if(this._decoders[threadId] != null){
+					this._decoders[threadId] = new LocalNetworkDecoderThread(threadId, this._fm, insts[threadId], this._compiler, this._decoders[threadId].getParam(), true, numPredictionsGenerated);
+				} else {
+					this._decoders[threadId] = new LocalNetworkDecoderThread(threadId, this._fm, insts[threadId], this._compiler, true, numPredictionsGenerated);
+				}
 			} else {
-				this._decoders[threadId] = new LocalNetworkDecoderThread(threadId, this._fm, insts[threadId], this._compiler, true);
+				this._decoders[threadId] = new LocalNetworkDecoderThread(threadId, this._fm, insts[threadId], this._compiler, false, numPredictionsGenerated);
 			}
 		}
 		
@@ -344,6 +518,8 @@ public abstract class NetworkModel implements Serializable{
 				results[k++] = output;
 			}
 		}
+		
+		Arrays.sort(results, Comparator.comparing(Instance::getInstanceId));
 		
 		return results;
 	}

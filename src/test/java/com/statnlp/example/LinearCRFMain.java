@@ -9,7 +9,6 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -23,11 +22,13 @@ import com.statnlp.example.linear_crf.Label;
 import com.statnlp.example.linear_crf.LinearCRFFeatureManager;
 import com.statnlp.example.linear_crf.LinearCRFInstance;
 import com.statnlp.example.linear_crf.LinearCRFNetworkCompiler;
+import com.statnlp.example.linear_crf.LinearCRFViewer;
 import com.statnlp.hybridnetworks.DiscriminativeNetworkModel;
 import com.statnlp.hybridnetworks.GlobalNetworkParam;
 import com.statnlp.hybridnetworks.NetworkConfig;
 import com.statnlp.hybridnetworks.NetworkConfig.ModelType;
 import com.statnlp.hybridnetworks.NetworkModel;
+import com.statnlp.neural.NeuralConfigReader;
 
 public class LinearCRFMain {
 	
@@ -43,10 +44,10 @@ public class LinearCRFMain {
 		boolean writeModelText = Boolean.parseBoolean(System.getProperty("writeModelText", "false"));
 
 		NetworkConfig.TRAIN_MODE_IS_GENERATIVE = Boolean.parseBoolean(System.getProperty("generativeTraining", "false"));
-		NetworkConfig.PARALLEL_FEATURE_EXTRACTION = Boolean.parseBoolean(System.getProperty("parallelTouch", "false"));
+		NetworkConfig.PARALLEL_FEATURE_EXTRACTION = Boolean.parseBoolean(System.getProperty("parallelTouch", "true"));
 		NetworkConfig.BUILD_FEATURES_FROM_LABELED_ONLY = Boolean.parseBoolean(System.getProperty("featuresFromLabeledOnly", "false"));
 		NetworkConfig.CACHE_FEATURES_DURING_TRAINING = Boolean.parseBoolean(System.getProperty("cacheFeatures", "true"));
-		NetworkConfig.L2_REGULARIZATION_CONSTANT = Double.parseDouble(System.getProperty("l2", "0.01"));
+		NetworkConfig.L2_REGULARIZATION_CONSTANT = Double.parseDouble(System.getProperty("l2", "0.01")); //0.01
 		NetworkConfig.NUM_THREADS = Integer.parseInt(System.getProperty("numThreads", "4"));
 		
 		NetworkConfig.MODEL_TYPE = ModelType.valueOf(System.getProperty("modelType", "CRF")); // The model to be used: CRF, SSVM, or SOFTMAX_MARGIN
@@ -57,10 +58,17 @@ public class LinearCRFMain {
 		// Set weight to not random to make meaningful comparison between sequential and parallel touch
 		NetworkConfig.RANDOM_INIT_WEIGHT = false;
 		NetworkConfig.FEATURE_INIT_WEIGHT = 0.0;
+		NetworkConfig.USE_NEURAL_FEATURES = false;
+		NetworkConfig.REGULARIZE_NEURAL_FEATURES = true;
+		NetworkConfig.OPTIMIZE_NEURAL = false;
+		NetworkConfig.AVOID_DUPLICATE_FEATURES = false;
 		String weightInitFile = null;
 		
-		int numIterations = Integer.parseInt(System.getProperty("numIter", "500"));
+		int numIterations = Integer.parseInt(System.getProperty("numIter", "1000"));
 		
+		if(NetworkConfig.USE_NEURAL_FEATURES){
+			NeuralConfigReader.readConfig("nn-crf-interface/neural_server/neural.config");
+		}
 		int argIndex = 0;
 		boolean shouldStop = false;
 		while(argIndex < args.length && !shouldStop){
@@ -99,6 +107,10 @@ public class LinearCRFMain {
 				break;
 			case "noCacheFeatures":
 				NetworkConfig.CACHE_FEATURES_DURING_TRAINING = false;
+				argIndex += 1;
+				break;
+			case "trySaveMemory":
+				NetworkConfig.AVOID_DUPLICATE_FEATURES = true;
 				argIndex += 1;
 				break;
 			case "l2":
@@ -163,10 +175,10 @@ public class LinearCRFMain {
 		System.err.println("Read.."+size+" instances from "+trainPath);
 		
 		OptimizerFactory optimizerFactory;
-		if(NetworkConfig.MODEL_TYPE.USE_SOFTMAX){
+		if(NetworkConfig.MODEL_TYPE.USE_SOFTMAX && !(NetworkConfig.USE_NEURAL_FEATURES && !NetworkConfig.OPTIMIZE_NEURAL)){
 			optimizerFactory = OptimizerFactory.getLBFGSFactory();
 		} else {
-			optimizerFactory = OptimizerFactory.getGradientDescentFactoryUsingSmoothedAdaDeltaThenGD(1e-2, 0.95, 5e-5, 0.9);
+			optimizerFactory = OptimizerFactory.getGradientDescentFactoryUsingAdaMThenStop();
 		}
 		if(weightInitFile != null){
 			HashMap<String, HashMap<String, HashMap<String, Double>>> featureWeightMap = new HashMap<String, HashMap<String, HashMap<String, Double>>>();
@@ -204,14 +216,14 @@ public class LinearCRFMain {
 		for(int i=argIndex; i<args.length; i++){
 			argsToFeatureManager[i-argIndex] = args[i];
 		}
+		LinearCRFNetworkCompiler compiler = new LinearCRFNetworkCompiler();
 		LinearCRFFeatureManager fm = new LinearCRFFeatureManager(new GlobalNetworkParam(optimizerFactory), argsToFeatureManager);
 		
-		LinearCRFNetworkCompiler compiler = new LinearCRFNetworkCompiler();
-		
 		NetworkModel model = DiscriminativeNetworkModel.create(fm, compiler, outstream);
+		model.visualize(LinearCRFViewer.class, trainInstances);
 		
 		model.train(trainInstances, numIterations);
-
+		
 		if(writeModelText){
 			PrintStream modelTextWriter = new PrintStream(modelPath+".txt");
 			modelTextWriter.println("Model path: "+modelPath);
@@ -224,11 +236,9 @@ public class LinearCRFMain {
 			modelTextWriter.println("Max iter: "+numIterations);
 			modelTextWriter.println();
 			modelTextWriter.println("Labels:");
-			List<?> labelsUsed = new ArrayList<Object>();
-			labelsUsed = Arrays.asList(((LinearCRFNetworkCompiler)compiler)._labels);
-			for(Object obj: labelsUsed){
-				modelTextWriter.println(obj);
-			}
+			List<Label> labelsUsed = new ArrayList<Label>(compiler._labels);
+			Collections.sort(labelsUsed);
+			modelTextWriter.println(labelsUsed);
 			GlobalNetworkParam paramG = fm.getParam_G();
 			modelTextWriter.println("Num features: "+paramG.countFeatures());
 			modelTextWriter.println("Features:");
@@ -247,9 +257,11 @@ public class LinearCRFMain {
 			}
 			modelTextWriter.close();
 		}
-
+		
 		LinearCRFInstance[] testInstances = readCoNLLData(testPath, true, false);
-		Instance[] predictions = model.decode(testInstances);
+//		testInstances = Arrays.copyOf(testInstances, 1);
+		int k = 8;
+		Instance[] predictions = model.decode(testInstances, k);
 		
 		PrintStream[] outstreams = new PrintStream[]{outstream, System.out};
 		PrintStream resultStream = new PrintStream(resultPath);
@@ -261,6 +273,7 @@ public class LinearCRFMain {
 			LinearCRFInstance instance = (LinearCRFInstance)ins;
 			ArrayList<Label> goldLabel = instance.getOutput();
 			ArrayList<Label> actualLabel = instance.getPrediction();
+			List<ArrayList<Label>> topKPredictions = instance.<ArrayList<Label>>getTopKPredictions();
 			ArrayList<String[]> words = instance.getInput();
 			for(int i=0; i<goldLabel.size(); i++){
 				if(goldLabel.get(i).equals(actualLabel.get(i))){
@@ -268,8 +281,7 @@ public class LinearCRFMain {
 				}
 				total++;
 				if(count < 3){
-//					System.out.println(words.get(i)[0]+" "+words.get(i)[1]+" "+goldLabel.get(i).getId()+" "+actualLabel.get(i).getId());
-					print(words.get(i)[0]+" "+goldLabel.get(i)+" "+actualLabel.get(i), outstreams);
+					print(String.format("%15s %6s %6s %6s%s", words.get(i)[0], goldLabel.get(i), actualLabel.get(i), topKPredictions.get(k-1).get(i), actualLabel.get(i) == topKPredictions.get(k-1).get(i) ? "" : " DIFFERENT"), outstreams);
 				}
 				resultStream.println(words.get(i)[0]+" "+goldLabel.get(i)+" "+actualLabel.get(i));
 			}
@@ -339,16 +351,69 @@ public class LinearCRFMain {
 		System.out.println("Options:\n"
 				+ "-modelPath <modelPath>\n"
 				+ "\tSerialize model to <modelPath>\n"
+				
 				+ "-writeModelText\n"
 				+ "\tAlso write the model in text version for debugging purpose\n"
+				
 				+ "-trainPath <trainPath>\n"
 				+ "\tTake training file from <trainPath>. If not specified, no training will be performed\n"
+				
 				+ "-testPath <testPath>\n"
 				+ "\tTake test file from <testPath>. If not specified, no testing will be performed\n"
+				
 				+ "-logPath <logPath>\n"
 				+ "\tPrint log information to the specified file\n"
+				
 				+ "-resultPath <resultPath>\n"
 				+ "\tPrint the result to <resultPath>\n"
+
+				+ "-parallelTouch\n"
+				+ "\tWhether the feature extraction process should be parallel.\n"
+				
+				+ "-featuresFromLabeledOnly\n"
+				+ "\tWhether to define features only from those appearing in training data.\n"
+				
+				+ "-noCacheFeatures\n"
+				+ "\tWhether to disable feature caching. It is recommended to keep caching enabled,\n"
+				+ "\tsince training will be quite slow otherwise."
+				
+				+ "-trySaveMemory\n"
+				+ "\tWhether an attempt to reduce memory usage should be done.\n"
+				+ "\tThe amount of saving depends on how the feature arrays were created.\n"
+				
+				+ "-l2 <l2_value>\n"
+				+ "\tThe l2 regularization parameter.\n"
+				
+				+ "-numThreads <n>\n"
+				+ "\tThe number of threads to train and test the model.\n"
+				
+				+ "-modelType (STRUCTURED_PERCEPTRON|CRF|SSVM|SOFTMAX_MARGIN)\n"
+				+ "\tThe training algorithm, must be one of these:\n"
+				+ "\t- Structured perceptron: mistake-driven, best combined with batch training.\n"
+				+ "\t- CRF: Standard log-likelihood training.\n"
+				+ "\t- SSVM: Max-margin based training.\n"
+				+ "\t- Softmax Margin: A cost-augmented log-likelihood training.\n"
+				
+				+ "-useBatchSGD\n"
+				+ "\tWhether to use batch training.\n"
+				
+				+ "-batchSize <n>\n"
+				+ "\tThe batch size to be used if -useBatchSGD is used.\n"
+				
+				+ "-margin <value>\n"
+				+ "\tThe margin hyperparameter if SSVM or Softmax-Margin training algorithm is used.\n"
+				+ "\tThe default value is 1.0.\n"
+				
+				+ "-weightInit <path_to_weights>\n"
+				+ "\tWhether to initialize the weights based on a file.\n"
+				+ "\tThe file should specify the feature weights in the following format:\n"
+				+ "\t-Lines with no prefix: Defines the feature types for the subsequent lines.\n"
+				+ "\t-Lines with '\t' (tab) prefix: Defines the output feature for the subsequent lines.\n"
+				+ "\t-Lines with '\t\t' (double tab) prefix: Defines the input feature and the feature weight.\n"
+				
+				+ "-numIter <n>\n"
+				+ "\tDefines the maximum number of iteration the training algorithm should run.\n"
+				+ "\tThe training might finish earlier than this number, but it will never exceed it.\n"
 				);
 	}
 }
