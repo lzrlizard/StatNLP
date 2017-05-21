@@ -104,6 +104,18 @@ public class FCRFInstance extends Instance {
 	public void setChunks(ArrayList<String> entities) {
 		this.chunks = entities;
 	}
+
+	@Override
+	public Object getTopKPredictions() {
+		// TODO Auto-generated method stub
+		return null;
+	}
+
+	@Override
+	public void setTopKPredictions(Object topKPredictions) {
+		// TODO Auto-generated method stub
+		
+	}
 	
 
 }

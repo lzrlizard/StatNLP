@@ -18,9 +18,9 @@ import java.util.Set;
 import com.statnlp.InitWeightOptimizerFactory;
 import com.statnlp.commons.ml.opt.OptimizerFactory;
 import com.statnlp.commons.types.Instance;
-import com.statnlp.example.linear_crf.Label;
+import com.statnlp.commons.types.Label;
+import com.statnlp.commons.types.LinearInstance;
 import com.statnlp.example.linear_crf.LinearCRFFeatureManager;
-import com.statnlp.example.linear_crf.LinearCRFInstance;
 import com.statnlp.example.linear_crf.LinearCRFNetworkCompiler;
 import com.statnlp.example.linear_crf.LinearCRFViewer;
 import com.statnlp.hybridnetworks.DiscriminativeNetworkModel;
@@ -167,12 +167,6 @@ public class LinearCRFMain {
 		}
 		
 		PrintStream outstream = new PrintStream(logPath);
-
-		int numTrain = -1;
-		Label.reset();
-		LinearCRFInstance[] trainInstances = readCoNLLData(trainPath, true, true, numTrain);
-		int size = trainInstances.length;
-		System.err.println("Read.."+size+" instances from "+trainPath);
 		
 		OptimizerFactory optimizerFactory;
 		if(NetworkConfig.MODEL_TYPE.USE_SOFTMAX && !(NetworkConfig.USE_NEURAL_FEATURES && !NetworkConfig.OPTIMIZE_NEURAL)){
@@ -216,14 +210,22 @@ public class LinearCRFMain {
 		for(int i=argIndex; i<args.length; i++){
 			argsToFeatureManager[i-argIndex] = args[i];
 		}
-		LinearCRFNetworkCompiler compiler = new LinearCRFNetworkCompiler();
-		LinearCRFFeatureManager fm = new LinearCRFFeatureManager(new GlobalNetworkParam(optimizerFactory), argsToFeatureManager);
+		GlobalNetworkParam param = new GlobalNetworkParam(optimizerFactory);
+
+		int numTrain = -1;
+		LinearInstance<Label>[] trainInstances = readCoNLLData(param, trainPath, true, true, numTrain);
+		int size = trainInstances.length;
+		System.err.println("Read.."+size+" instances from "+trainPath);
+		
+		LinearCRFNetworkCompiler compiler = new LinearCRFNetworkCompiler(param.LABELS.values());
+		LinearCRFFeatureManager fm = new LinearCRFFeatureManager(param, argsToFeatureManager);
 		
 		NetworkModel model = DiscriminativeNetworkModel.create(fm, compiler, outstream);
 		model.visualize(LinearCRFViewer.class, trainInstances);
 		
 		model.train(trainInstances, numIterations);
 		
+		writeModelText = true;
 		if(writeModelText){
 			PrintStream modelTextWriter = new PrintStream(modelPath+".txt");
 			modelTextWriter.println("Model path: "+modelPath);
@@ -236,7 +238,7 @@ public class LinearCRFMain {
 			modelTextWriter.println("Max iter: "+numIterations);
 			modelTextWriter.println();
 			modelTextWriter.println("Labels:");
-			List<Label> labelsUsed = new ArrayList<Label>(compiler._labels);
+			List<Label> labelsUsed = new ArrayList<Label>(compiler._labels.values());
 			Collections.sort(labelsUsed);
 			modelTextWriter.println(labelsUsed);
 			GlobalNetworkParam paramG = fm.getParam_G();
@@ -258,7 +260,7 @@ public class LinearCRFMain {
 			modelTextWriter.close();
 		}
 		
-		LinearCRFInstance[] testInstances = readCoNLLData(testPath, true, false);
+		LinearInstance<Label>[] testInstances = readCoNLLData(param, testPath, true, false);
 //		testInstances = Arrays.copyOf(testInstances, 1);
 		int k = 8;
 		Instance[] predictions = model.decode(testInstances, k);
@@ -270,10 +272,11 @@ public class LinearCRFMain {
 		int total = 0;
 		int count = 0;
 		for(Instance ins: predictions){
-			LinearCRFInstance instance = (LinearCRFInstance)ins;
+			@SuppressWarnings("unchecked")
+			LinearInstance<Label> instance = (LinearInstance<Label>)ins;
 			ArrayList<Label> goldLabel = instance.getOutput();
 			ArrayList<Label> actualLabel = instance.getPrediction();
-			List<ArrayList<Label>> topKPredictions = instance.<ArrayList<Label>>getTopKPredictions();
+			List<ArrayList<Label>> topKPredictions = instance.getTopKPredictions();
 			ArrayList<String[]> words = instance.getInput();
 			for(int i=0; i<goldLabel.size(); i++){
 				if(goldLabel.get(i).equals(actualLabel.get(i))){
@@ -296,10 +299,11 @@ public class LinearCRFMain {
 		outstream.close();
 	}
 	
-	private static LinearCRFInstance[] readCoNLLData(String fileName, boolean withLabels, boolean isLabeled, int number) throws IOException{
+	@SuppressWarnings("unchecked")
+	private static LinearInstance<Label>[] readCoNLLData(GlobalNetworkParam param, String fileName, boolean withLabels, boolean isLabeled, int number) throws IOException{
 		InputStreamReader isr = new InputStreamReader(new FileInputStream(fileName), "UTF-8");
 		BufferedReader br = new BufferedReader(isr);
-		ArrayList<LinearCRFInstance> result = new ArrayList<LinearCRFInstance>();
+		ArrayList<LinearInstance<Label>> result = new ArrayList<LinearInstance<Label>>();
 		ArrayList<String[]> words = null;
 		ArrayList<Label> labels = null;
 		int instanceId = 1;
@@ -312,7 +316,7 @@ public class LinearCRFMain {
 			}
 			String line = br.readLine().trim();
 			if(line.length() == 0){
-				LinearCRFInstance instance = new LinearCRFInstance(instanceId, 1, words, labels);
+				LinearInstance<Label> instance = new LinearInstance<Label>(instanceId, 1, words, labels);
 				if(isLabeled){
 					instance.setLabeled(); // Important!
 				} else {
@@ -328,17 +332,17 @@ public class LinearCRFMain {
 				String[] features = line.substring(0, lastSpace).split(" ");
 				words.add(features);
 				if(withLabels){
-					Label label = Label.get(line.substring(lastSpace+1));
+					Label label = param.getLabel(line.substring(lastSpace+1));
 					labels.add(label);
 				}
 			}
 		}
 		br.close();
-		return result.toArray(new LinearCRFInstance[result.size()]);
+		return result.toArray(new LinearInstance[result.size()]);
 	}
 	
-	private static LinearCRFInstance[]  readCoNLLData(String fileName, boolean withLabels, boolean isLabeled) throws IOException{
-		return readCoNLLData(fileName, withLabels, isLabeled, -1);
+	private static LinearInstance<Label>[]  readCoNLLData(GlobalNetworkParam param, String fileName, boolean withLabels, boolean isLabeled) throws IOException{
+		return readCoNLLData(param, fileName, withLabels, isLabeled, -1);
 	}
 	
 	private static List<String> sorted(Set<String> coll){

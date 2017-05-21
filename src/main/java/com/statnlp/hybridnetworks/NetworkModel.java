@@ -94,11 +94,19 @@ public abstract class NetworkModel implements Serializable{
 		return _allInstances;
 	}
 	
+	public FeatureManager getFeatureManager(){
+		return _fm;
+	}
+	
+	public NetworkCompiler getNetworkCompiler(){
+		return _compiler;
+	}
+	
 	protected abstract Instance[][] splitInstancesForTrain();
 	
-	public Instance[][] splitInstancesForTest() {
+	public Instance[][] splitInstancesForTest(Instance[] testInsts) {
 		
-		System.err.println("#instances="+this._allInstances.length);
+		System.err.println("#instances="+testInsts.length);
 		
 		Instance[][] insts = new Instance[this._numThreads][];
 
@@ -109,8 +117,8 @@ public abstract class NetworkModel implements Serializable{
 		}
 		
 		threadId = 0;
-		for(int k = 0; k<this._allInstances.length; k++){
-			Instance inst = this._allInstances[k];
+		for(int k = 0; k< testInsts.length; k++){
+			Instance inst = testInsts[k];
 			insts_list.get(threadId).add(inst);
 			threadId = (threadId+1)%this._numThreads;
 		}
@@ -189,10 +197,10 @@ public abstract class NetworkModel implements Serializable{
 			System.err.printf("Done in %.3fs\n", (end-start)/1.0e9);
 		}
 		try {
-			new VisualizerFrame(this, clazz.getConstructor(NetworkCompiler.class, FeatureManager.class).newInstance(_compiler, _fm));
+			new VisualizerFrame(this, clazz.getConstructor(GlobalNetworkParam.class).newInstance(_fm.getParam_G()));
 		} catch (InstantiationException | IllegalAccessException | IllegalArgumentException | InvocationTargetException
 				| NoSuchMethodException | SecurityException e) {
-			throw new IllegalArgumentException("The viewer class "+clazz.getName()+" must implement the constructor with signature (NetworkCompiler, FeatureManager)");
+			throw new IllegalArgumentException("The viewer class "+clazz.getName()+" must implement the constructor with signature (GlobalNetworkParam)");
 		}
 	}
 	
@@ -482,7 +490,7 @@ public abstract class NetworkModel implements Serializable{
 			this._decoders = new LocalNetworkDecoderThread[this._numThreads];
 		}
 		
-		Instance[][] insts = this.splitInstancesForTest();
+		Instance[][] insts = this.splitInstancesForTest(allInstances);
 		
 		//distribute the works into different threads.
 		for(int threadId = 0; threadId<this._numThreads; threadId++){
